@@ -2,8 +2,7 @@ import os
 
 from agent.tools_and_schemas import SearchQueryList, Reflection
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_core.messages import AIMessage
 from langgraph.types import Send
 from langgraph.graph import StateGraph
 from langgraph.graph import START, END
@@ -34,9 +33,10 @@ from agent.utils import (
     resolve_urls,
 )
 
-load_dotenv()
-# if os.getenv("GEMINI_API_KEY") is None:
-#     raise ValueError("GEMINI_API_KEY is not set")
+# load_dotenv()
+
+if os.getenv("GEMINI_API_KEY") is None:
+    raise ValueError("GEMINI_API_KEY is not set")
 
 # Used for Google Search API
 genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
