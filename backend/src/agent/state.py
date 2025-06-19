@@ -15,6 +15,7 @@ from typing_extensions import Annotated
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages]
     search_query: Annotated[list, operator.add]
+    plan: str
     web_research_result: Annotated[list, operator.add]
     sources_gathered: Annotated[list, operator.add]
     initial_search_query_count: int
@@ -43,7 +44,6 @@ class QueryGenerationState(TypedDict):
 class WebSearchState(TypedDict):
     search_query: str
     id: str
-
 
 @dataclass(kw_only=True)
 class SearchStateOutput:

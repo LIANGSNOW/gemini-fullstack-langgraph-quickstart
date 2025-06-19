@@ -9,6 +9,9 @@ class SearchQueryList(BaseModel):
     rationale: str = Field(
         description="A brief explanation of why these queries are relevant to the research topic."
     )
+    plan: str = Field(
+        description = "A plan about steps about what you want to know to answer the question"
+    )
 
 
 class Reflection(BaseModel):
