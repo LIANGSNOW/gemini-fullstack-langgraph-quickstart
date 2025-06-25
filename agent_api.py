@@ -1,4 +1,3 @@
-# from fastapi import FastAPI, Request
 from contextlib import AsyncExitStack
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import create_react_agent
@@ -8,17 +7,17 @@ from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import List, Dict, Any
-import uvicorn
+from fastapi import FastAPI, Request, Body
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Dict, Any, Generator, AsyncGenerator, Optional
+import uvicorn
 import time
-from fastapi.responses import StreamingResponse
-from fastapi import Body
 import asyncio
 import json
+import random
+import re
 from backend.src.agent.graph_v1 import graph
 from dotenv import load_dotenv
 
@@ -160,7 +159,7 @@ async def chat_completions(payload: dict = Body(...)):
         
         # send first chunk (delta) - role only
         chunk = {
-            "id": "chatcmpl-agent123",
+            "id": f"chatcmpl-agent-{int(time.time())}",
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": "langgraph-agent",
@@ -168,12 +167,18 @@ async def chat_completions(payload: dict = Body(...)):
         }
         yield f"data: {json.dumps(chunk)}\n\n"
 
-        # send token-by-token (here we just split on spaces)
-        for token in response_content.split():
-            chunk["choices"][0]["delta"] = {"content": token + " "}
+        # Smart tokenization - handle markdown and code blocks specially
+        tokens = smart_tokenize(response_content)
+        
+        # Stream tokens with natural typing speed
+        for token in tokens:
+            chunk["choices"][0]["delta"] = {"content": token}
             yield f"data: {json.dumps(chunk)}\n\n"
-            await asyncio.sleep(0.04)           # simulate typing
-
+            
+            # Variable typing speed based on token characteristics
+            delay = calculate_typing_delay(token)
+            await asyncio.sleep(delay)
+        
         # final chunk with finish_reason
         chunk["choices"][0].update({"delta": {}, "finish_reason": "stop"})
         yield f"data: {json.dumps(chunk)}\n\n"
@@ -186,8 +191,83 @@ async def chat_completions(payload: dict = Body(...)):
 def health():
     return {"status": "running"}
 
+# Helper functions for improved streaming
+
+def smart_tokenize(text: str) -> List[str]:
+    """
+    Intelligently tokenize text to preserve markdown formatting and natural language flow.
+    """
+    # Handle code blocks specially
+    code_block_pattern = r'(```[\s\S]*?```)'
+    parts = re.split(code_block_pattern, text)
+    
+    result = []
+    for part in parts:
+        if part.startswith('```') and part.endswith('```'):
+            # Keep code blocks mostly intact but split into lines for better UX
+            lines = part.split('\n')
+            for i, line in enumerate(lines):
+                if i == 0 or i == len(lines) - 1:  # First line (```language) or last line (```)
+                    result.append(line + '\n')
+                else:
+                    # Process each code line
+                    result.append(line + '\n')
+        else:
+            # Handle markdown headers specially
+            header_pattern = r'(^#{1,6}\s.*$)'
+            md_parts = re.split(header_pattern, part, flags=re.MULTILINE)
+            
+            for md_part in md_parts:
+                if re.match(header_pattern, md_part, re.MULTILINE):
+                    # Keep headers intact
+                    result.append(md_part)
+                else:
+                    # Split normal text into sentences first, then into smaller chunks
+                    sentences = re.split(r'([.!?]\s)', md_part)
+                    for i in range(0, len(sentences), 2):
+                        sentence = sentences[i]
+                        ending = sentences[i + 1] if i + 1 < len(sentences) else ''
+                        
+                        # Now split the sentence into meaningful chunks
+                        # Keep punctuation with words, split on spaces
+                        chunks = re.findall(r'\S+\s*', sentence + ending)
+                        result.extend(chunks)
+    
+    return result
+
+def calculate_typing_delay(token: str) -> float:
+    """
+    Calculate a natural typing delay based on token characteristics:
+    - Longer tokens get slightly longer delays
+    - Special markdown tokens get shorter delays (makes formatting appear faster)
+    - Random variation added for natural feel
+    """
+    # Base delay
+    base_delay = 0.03
+    
+    # Adjust for token length (longer tokens = slightly longer delay)
+    length_factor = min(len(token) / 10, 1.0)
+    
+    # Shorter delays for markdown formatting and symbols
+    is_markdown = bool(re.match(r'^[#*_`~\[\]()]+$', token.strip()))
+    markdown_factor = 0.5 if is_markdown else 1.0
+    
+    # Punctuation gets shorter delays
+    is_punctuation = bool(re.match(r'^[.,;:!?-]+$', token.strip()))
+    punctuation_factor = 0.3 if is_punctuation else 1.0
+    
+    # New line gets a slightly longer pause
+    newline_factor = 1.5 if '\n' in token else 1.0
+    
+    # Add randomness for natural feel (±20%)
+    random_factor = random.uniform(0.8, 1.2)
+    
+    delay = base_delay * length_factor * markdown_factor * punctuation_factor * newline_factor * random_factor
+    
+    # Ensure minimum delay
+    return max(delay, 0.01)
+
 # Run the server
 if __name__ == "__main__":
-
     uvicorn.run(app, host="0.0.0.0", port=9000)
 
