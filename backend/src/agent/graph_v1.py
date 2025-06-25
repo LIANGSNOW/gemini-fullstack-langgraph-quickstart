@@ -1,22 +1,23 @@
 import os
 
-from agent.tools_and_schemas import SearchQueryList, Reflection
+from backend.src.agent.tools_and_schemas import SearchQueryList, Reflection
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.pydantic_v1 import BaseModel, Field
 from langgraph.types import Send
 from langgraph.graph import StateGraph
 from langgraph.graph import START, END
 from langchain_core.runnables import RunnableConfig
 from google.genai import Client
 
-from agent.state import (
+from backend.src.agent.state import (
     OverallState,
     QueryGenerationState,
     ReflectionState,
     WebSearchState,
 )
-from agent.configuration import Configuration
-from agent.prompts import (
+from backend.src.agent.configuration import Configuration
+from backend.src.agent.prompts import (
     get_current_date,
     query_writer_instructions,
     web_searcher_instructions,
@@ -26,24 +27,19 @@ from agent.prompts import (
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_deepseek import ChatDeepSeek
 
-from agent.utils import (
+from backend.src.agent.utils import (
     get_citations,
     get_research_topic,
     insert_citation_markers,
     resolve_urls,
 )
+from typing import TypedDict, List, Annotated, Literal, Dict, Union, Optional 
+from pydantic import BaseModel, Field
+from langchain_tavily import TavilySearch
+from langchain_core.runnables import RunnableLambda, RunnableSequence
+import json
 
-# load_dotenv()
-
-if os.getenv("GEMINI_API_KEY") is None:
-    raise ValueError("GEMINI_API_KEY is not set")
-
-# Used for Google Search API
-genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-
-# Nodes
-def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
+def generate_query(state: OverallState, config: RunnableConfig)->QueryGenerationState :
     """LangGraph node that generates a search queries based on the User's question.
 
     Uses Gemini 2.0 Flash to create an optimized search query for web research based on
@@ -72,12 +68,11 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     llm = ChatDeepSeek(
     model="deepseek-chat",
     temperature=1,
-    max_tokens=1024,
     timeout=None,
     max_retries=2,
     )
     structured_llm = llm.with_structured_output(SearchQueryList)
-
+    print(get_research_topic(state["messages"]),)
     # Format the prompt
     current_date = get_current_date()
     formatted_prompt = query_writer_instructions.format(
@@ -87,8 +82,9 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     )
     # Generate the search queries
     result = structured_llm.invoke(formatted_prompt)
-    return {"query_list": result.query}
-
+    # state['plan'] = result.plan
+    print(result)
+    return {"plan": result.plan, "query_list": result.query}
 
 def continue_to_web_research(state: QueryGenerationState):
     """LangGraph node that sends the search queries to the web research node.
@@ -100,6 +96,32 @@ def continue_to_web_research(state: QueryGenerationState):
         for idx, search_query in enumerate(state["query_list"])
     ]
 
+class Citation(BaseModel):
+    label: str = Field(
+        ...,
+        description="The name of the website.",
+    )
+    source_id: str = Field(
+        ...,
+        description="The url of a SPECIFIC source which justifies the answer.",
+    )
+    quote: str = Field(
+        ...,
+        description="The VERBATIM quote from the specified source that justifies the answer.",
+    )
+
+
+class QuotedAnswer(BaseModel):
+    """Answer the user question based only on the given sources, and return all the sources used."""
+    answer: str = Field(
+        ...,
+        description="The answer to the user question, which is based only on the given sources. Include any relevant sources in the answer as markdown hyperlinks. For example: 'This is a sample text ([url website](url))'"
+    )
+    citations: List[Citation] = Field(
+        ..., description="Citations from the given sources that justify the answer."
+    )
+
+
 
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """LangGraph node that performs web research using the native Google Search API tool.
@@ -108,42 +130,90 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
 
     Args:
         state: Current graph state containing the search query and research loop count
-        config: Configuration for the runnable, including search API settings
+        config: Configura"tion for the runnable, including search API settings
 
     Returns:
         Dictionary with state update, including sources_gathered, research_loop_count, and web_research_results
     """
     # Configure
-    configurable = Configuration.from_runnable_config(config)
+    load_dotenv()
+    llm = ChatDeepSeek(
+    model="deepseek-chat",
+    temperature=1,
+    timeout=None,
+    max_retries=2,
+    )
+
+
+    # Initialize Tavily Search Tool
+    tavily_search_tool = TavilySearch(
+        max_results=5,
+        topic="general",
+    )
+    tool_calling_llm = llm.bind_tools([tavily_search_tool])
+    # agent = create_react_agent(llm, [tavily_search_tool])
+
+    # user_input = "What nation hosted the Euro 2024?"
+    user_input = state["search_query"]
+    # formatted_prompt = web_searcher_instructions.format(
+    #     current_date=get_current_date(),
+    #     research_topic='price of 5090',
+    # )
+
+    web_searcher_instructions = """Use your search tool to conduct targeted Searches to gather the most recent, credible information on "{research_topic}" and synthesize it into a verifiable text artifact.
+
+    Instructions:
+    - Query should ensure that the most current information is gathered. The current date is {current_date}.
+    - Conduct multiple, diverse searches to gather comprehensive information.
+    - Consolidate key findings while meticulously tracking the source(s) for each specific piece of information.
+    - The output should be a well-written summary or report based on your search findings. 
+    - Only include the information found in the search results, don't make up any information.
+
+    Research Topic:
+    {research_topic}
+    """
+
     formatted_prompt = web_searcher_instructions.format(
         current_date=get_current_date(),
-        research_topic=state["search_query"],
+        research_topic=user_input,
+    ) + "\n\nIMPORTANT: Use the search tool provided to find the most up-to-date information, and choose the right arguments for the search tool."
+
+
+    def run_tool(response_msg):
+        if "tool_calls" in response_msg.additional_kwargs:
+            for tool_call in response_msg.additional_kwargs["tool_calls"]:
+                tool_name = tool_call["function"]["name"]
+                arguments = tool_call["function"]["arguments"]
+                parsed_args = json.loads(arguments)
+                if tool_name == "tavily_search":
+                    return {"tool_result": tavily_search_tool.invoke(parsed_args)}
+        return {"tool_result": "No tool call made."}
+
+    # === Final LLM with structured output ===
+    final_llm = llm.with_structured_output(QuotedAnswer)
+    # Step 3: Combine it with the LLM output step
+    chain = (
+        tool_calling_llm |
+        RunnableLambda(run_tool) |
+        (lambda inputs: final_llm.invoke(f"Based on this search result: {inputs['tool_result']}, answer the user question."))
     )
 
-    # Uses the google genai client as the langchain client doesn't return grounding metadata
-    response = genai_client.models.generate_content(
-        model=configurable.query_generator_model,
-        contents=formatted_prompt,
-        config={
-            "tools": [{"google_search": {}}],
-            "temperature": 0,
-        },
-    )
-    # resolve the urls to short urls for saving tokens and time
-    resolved_urls = resolve_urls(
-        response.candidates[0].grounding_metadata.grounding_chunks, state["id"]
-    )
-    # Gets the citations and adds them to the generated text
-    citations = get_citations(response, resolved_urls)
-    modified_text = insert_citation_markers(response.text, citations)
-    sources_gathered = [item for citation in citations for item in citation["segments"]]
+    result = chain.invoke(formatted_prompt)
+    web_research_result = result.answer + "\n---\n\n".join([citation.source_id for citation in result.citations])
+    citations_list = []
+    for citation in result.citations:
+        citations_dict = {}
+        citations_dict['label'] = citation.label
+        citations_dict['short_url'] = citation.source_id
+        citations_dict['value'] = citation.quote
+        citations_list.append(citations_dict)
 
+    
     return {
-        "sources_gathered": sources_gathered,
+        "sources_gathered": citations_list,
         "search_query": [state["search_query"]],
-        "web_research_result": [modified_text],
+        "web_research_result": [web_research_result],
     }
-
 
 def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     """LangGraph node that identifies knowledge gaps and generates potential follow-up queries.
@@ -170,6 +240,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         current_date=current_date,
         research_topic=get_research_topic(state["messages"]),
         summaries="\n\n---\n\n".join(state["web_research_result"]),
+        plan=state["plan"],
     )
     # init Reasoning Model
     # llm = ChatGoogleGenerativeAI(
@@ -265,9 +336,8 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
     #     api_key=os.getenv("GEMINI_API_KEY"),
     # )
     llm = ChatDeepSeek(
-    model="deepseek-chat",
+    model="deepseek-reasoner",
     temperature=1,
-    max_tokens=1024,
     timeout=None,
     max_retries=2,
     )

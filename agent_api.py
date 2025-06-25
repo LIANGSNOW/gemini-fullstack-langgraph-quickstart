@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse
 from fastapi import Body
 import asyncio
 import json
-from agent.graph import graph
+from backend.src.agent.graph_v1 import graph
 from dotenv import load_dotenv
 
 
@@ -85,13 +85,15 @@ async def get_response(input):
     # Initialize the agent manager
     # await agent_manager.connect_to_server()
         
-    # Process message with agent
-    # agent = await agent_manager.create_react_agent()
-    # agent_response = await agent.ainvoke({'messages': '分析最近的A股大盘'})
-    # state = graph.invoke({"messages": [{"role": "user", "content": "Who won the euro 2024"}], "max_research_loops": 3, "initial_search_query_count": 3})
-    agent_response =  graph.invoke({'messages': [HumanMessage(content=input)]})
-    print(agent_response)
-    return agent_response
+    # Process message with agent using ainvoke for proper async handling
+    # This prevents blocking the event loop
+    state = await graph.ainvoke({
+        "messages": [{"role": "user", "content": input}], 
+        "max_research_loops": 5, 
+        "initial_search_query_count": 5
+    })
+    print("Agent state received")
+    return state
 
 # FastAPI app
 app = FastAPI()
@@ -132,8 +134,9 @@ async def chat_completions(payload: dict = Body(...)):
     stream = payload.get("stream", False)
     # --- non-streaming path --------------------------------------------------
     if not stream:
-        content = await get_response(payload['messages'][-1]['content'])
-        # content = f"Echo: {payload['messages'][-1]['content']}"
+        state = await get_response(payload['messages'][-1]['content'])
+        # Extract the last message from the agent's response
+        content = state['messages'][-1].content if len(state['messages']) > 0 else ""
         return {
             "id": "chatcmpl-agent123",
             "object": "chat.completion",
@@ -145,19 +148,17 @@ async def chat_completions(payload: dict = Body(...)):
                 "finish_reason": "stop"
             }],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            # "usage": {"prompt_tokens": 0, "completion_tokens": len(content.split()), "total_tokens": len(content.split())}
-
         }
 
     # --- streaming path ------------------------------------------------------
     async def event_stream():
-        # full_text = f"Echo: {payload['messages'][-1]['content']}"
-        full_text = await get_response(payload['messages'][-1]['content'])
+        state = await get_response(payload['messages'][-1]['content'])
         # Extract the response content from the AIMessage in full_text
-        response_content = full_text['messages'][1].content if len(full_text['messages']) > 1 else ""
-        print(response_content)
-        # send first chunk (delta)
-        full_text = response_content
+        # Use the last message in the list for more reliability
+        response_content = state['messages'][-1].content if len(state['messages']) > 0 else ""
+        print("Agent response:", response_content)
+        
+        # send first chunk (delta) - role only
         chunk = {
             "id": "chatcmpl-agent123",
             "object": "chat.completion.chunk",
@@ -168,7 +169,7 @@ async def chat_completions(payload: dict = Body(...)):
         yield f"data: {json.dumps(chunk)}\n\n"
 
         # send token-by-token (here we just split on spaces)
-        for token in full_text.split():
+        for token in response_content.split():
             chunk["choices"][0]["delta"] = {"content": token + " "}
             yield f"data: {json.dumps(chunk)}\n\n"
             await asyncio.sleep(0.04)           # simulate typing
