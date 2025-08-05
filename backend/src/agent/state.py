@@ -14,6 +14,7 @@ from typing_extensions import Annotated
 
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages]
+    needs_search: bool
     search_query: Annotated[list, operator.add]
     plan: str
     web_research_result: Annotated[list, operator.add]

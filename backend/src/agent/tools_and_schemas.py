@@ -13,6 +13,11 @@ class SearchQueryList(BaseModel):
         description = "A plan about steps about what you want to know to answer the question"
     )
 
+class QueryNecessary(BaseModel):
+
+    binary_score: str = Field(
+        description="Relevance score: 'yes' if relevant, or 'no' if not relevant"
+    )
 
 class Reflection(BaseModel):
     is_sufficient: bool = Field(
